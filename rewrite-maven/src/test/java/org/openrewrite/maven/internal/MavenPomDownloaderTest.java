@@ -574,6 +574,45 @@ class MavenPomDownloaderTest {
         }
 
         @Test
+        void dontAllowPomDowloadFailure(@TempDir Path localRepository) throws IOException, MavenDownloadingException {
+            MavenRepository mavenLocal = MavenRepository.builder()
+              .id("local")
+              .uri(localRepository.toUri().toString())
+              .snapshots(false)
+              .knownToExist(true)
+              .build();
+
+            // Do not return invalid dependency.
+            assertThrows(MavenDownloadingException.class, () ->
+              new MavenPomDownloader(emptyMap(), ctx)
+                .download(new GroupArtifactVersion("com.bad", "bad-artifact", "1"), null, null, List.of(mavenLocal)));
+        }
+
+        @Test
+        void allowPomDowloadFailure(@TempDir Path localRepository) throws IOException, MavenDownloadingException {
+            Path localArtifact = localRepository.resolve("com/some/some-artifact");
+            assertThat(localArtifact.toFile().mkdirs()).isTrue();
+            Files.createDirectories(localArtifact.resolve("1"));
+
+            Path localJar = localRepository.resolve("com/some/some-artifact/1/some-artifact-1.jar");
+            Files.writeString(localJar, "some content not to be emtpy");
+
+            MavenRepository mavenLocal = MavenRepository.builder()
+              .id("local")
+              .uri(localRepository.toUri().toString())
+              .snapshots(false)
+              .knownToExist(true)
+              .build();
+
+            // Do not throw exception since we have a jar
+            var result = new MavenPomDownloader(emptyMap(), ctx).download(new GroupArtifactVersion("com.some", "some-artifact", "1"), null, null, List.of(mavenLocal));
+
+            assertThat(result.getGav().getGroupId()).isEqualTo("com.some");
+            assertThat(result.getGav().getArtifactId()).isEqualTo("some-artifact");
+            assertThat(result.getGav().getVersion()).isEqualTo("1");
+        }
+
+        @Test
         void doNotRenameRepoForCustomMavenLocal(@TempDir Path tempDir) throws MavenDownloadingException, IOException {
             GroupArtifactVersion gav = createArtifact(tempDir);
             MavenExecutionContextView.view(ctx).setLocalRepository(MavenRepository.MAVEN_LOCAL_DEFAULT.withUri(tempDir.toUri().toString()));
@@ -1016,6 +1055,64 @@ class MavenPomDownloaderTest {
                   .uri("http://%s:%d/maven".formatted(mockRepo.getHostName(), mockRepo.getPort()))
                   .username("${env.ARTIFACTORY_USERNAME}")
                   .password("${env.ARTIFACTORY_USERNAME}")
+                  .build());
+
+                assertDoesNotThrow(() -> downloader.download(gav, null, null, repositories));
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Test
+        @DisplayName("Throw exception if there is no pom and no jar for the artifact")
+        @Issue("https://github.com/openrewrite/rewrite/issues/4687")
+        void pomNotFoundWithNoJarShouldThrow() {
+            var downloader = new MavenPomDownloader(emptyMap(), ctx);
+            var gav = new GroupArtifactVersion("fred", "fred", "1");
+            try (MockWebServer mockRepo = getMockServer()) {
+                mockRepo.setDispatcher(new Dispatcher() {
+                    @Override
+                    public MockResponse dispatch(RecordedRequest recordedRequest) {
+                        assert recordedRequest.getPath() != null;
+                        return new MockResponse().setResponseCode(404).setBody("");
+                    }
+                });
+                mockRepo.start();
+                var repositories = List.of(MavenRepository.builder()
+                  .id("id")
+                  .uri("http://%s:%d/maven".formatted(mockRepo.getHostName(), mockRepo.getPort()))
+                  .username("user")
+                  .password("pass")
+                  .build());
+
+                assertThrows(MavenDownloadingException.class,() -> downloader.download(gav, null, null, repositories));
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Test
+        @DisplayName("Don't throw exception if there is no pom and but there is a jar for the artifact")
+        @Issue("https://github.com/openrewrite/rewrite/issues/4687")
+        void pomNotFoundWithJarFoundShouldntThrow() {
+            var downloader = new MavenPomDownloader(emptyMap(), ctx);
+            var gav = new GroupArtifactVersion("fred", "fred", "1");
+            try (MockWebServer mockRepo = getMockServer()) {
+                mockRepo.setDispatcher(new Dispatcher() {
+                    @Override
+                    public MockResponse dispatch(RecordedRequest recordedRequest) {
+                        assert recordedRequest.getPath() != null;
+                        if (recordedRequest.getPath().endsWith("fred/fred/1/fred-1.pom"))
+                            return new MockResponse().setResponseCode(404).setBody("");
+                        return new MockResponse().setResponseCode(200).setBody("some bytes so the jar isn't empty");
+                    }
+                });
+                mockRepo.start();
+                var repositories = List.of(MavenRepository.builder()
+                  .id("id")
+                  .uri("http://%s:%d/maven".formatted(mockRepo.getHostName(), mockRepo.getPort()))
+                  .username("user")
+                  .password("pass")
                   .build());
 
                 assertDoesNotThrow(() -> downloader.download(gav, null, null, repositories));
